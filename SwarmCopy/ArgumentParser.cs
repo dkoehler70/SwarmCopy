@@ -7,8 +7,8 @@ namespace SwarmCopy
     {
         public string Input { get; set; }
         public string Output { get; set; }
-        public bool IsInputDatabase => Input != null && Input.StartsWith("db:", StringComparison.OrdinalIgnoreCase);
-        public bool IsOutputDatabase => Output != null && Output.StartsWith("db:", StringComparison.OrdinalIgnoreCase);
+        public bool IsInputDatabase => Input != null && (Input.StartsWith("db:", StringComparison.OrdinalIgnoreCase) || Input.StartsWith("duck:", StringComparison.OrdinalIgnoreCase));
+        public bool IsOutputDatabase => Output != null && (Output.StartsWith("db:", StringComparison.OrdinalIgnoreCase) || Output.StartsWith("duck:", StringComparison.OrdinalIgnoreCase));
     }
 
     public class ArgumentParser

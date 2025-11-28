@@ -41,32 +41,241 @@ namespace SwarmCopy
             var inputConn = ConnectionInfo.Parse(input);
             var outputConn = ConnectionInfo.Parse(output);
 
+            // Special case: When copying from SQL Server's default schema (dbo) to DuckDB,
+            // use DuckDB's default schema (main) instead - "default to default"
+            if (outputConn.IsDuckDb && outputConn.DbSchema == "dbo")
+            {
+                outputConn.DbSchema = "main";
+                Console.WriteLine($"Converting schema from 'dbo' to 'main' for DuckDB");
+            }
+
             if (inputConn.DbTable == "*")
             {
                 // Copy all tables
                 var tables = DatabaseReader.GetAllTables(inputConn);
                 Console.WriteLine($"Found {tables.Length} tables to copy");
 
-                // Smart partition: divide threads (cores * multiplier) among tables for I/O efficiency
-                var coreCount = Environment.ProcessorCount;
-                var totalThreads = coreCount * THREAD_MULTIPLIER;
-                var partitionsPerTable = Math.Max(1, totalThreads / tables.Length);
-                Console.WriteLine($"Using {partitionsPerTable} partitions per table ({coreCount} cores × {THREAD_MULTIPLIER} = {totalThreads} threads / {tables.Length} tables)");
-
-                Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = coreCount }, table =>
+                if (outputConn.IsDuckDb)
                 {
-                    Console.WriteLine($"Copying table: {table}");
-                    CopySingleTableToTable(inputConn, outputConn, table, table, partitionsPerTable);
-                    Console.WriteLine($"Completed table: {table}");
-                });
+                    // Two-phase approach for DuckDB: CSV export then bulk load
+                    CopyDatabaseToDuckDBViaCsv(inputConn, outputConn, tables);
+                }
+                else
+                {
+                    // Direct copy for SQL Server
+                    var coreCount = Environment.ProcessorCount;
+                    var totalThreads = coreCount * THREAD_MULTIPLIER;
+                    var partitionsPerTable = Math.Max(1, totalThreads / tables.Length);
+                    Console.WriteLine($"Using {partitionsPerTable} partitions per table ({coreCount} cores × {THREAD_MULTIPLIER} = {totalThreads} threads / {tables.Length} tables)");
+
+                    Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = coreCount }, table =>
+                    {
+                        Console.WriteLine($"Copying table: {table}");
+                        CopySingleTableToTable(inputConn, outputConn, table, table, partitionsPerTable);
+                        Console.WriteLine($"Completed table: {table}");
+                    });
+                }
             }
             else
             {
-                // Copy single table - use 2x cores for I/O efficiency
+                // Copy single table with partitioning for I/O efficiency
                 var partitionCount = Environment.ProcessorCount * THREAD_MULTIPLIER;
                 var outputTable = string.IsNullOrEmpty(outputConn.DbTable) ? inputConn.DbTable : outputConn.DbTable;
                 Console.WriteLine($"Using {partitionCount} partitions for single table ({Environment.ProcessorCount} cores × {THREAD_MULTIPLIER})");
+
                 CopySingleTableToTable(inputConn, outputConn, inputConn.DbTable, outputTable, partitionCount);
+            }
+        }
+
+        private static void CopyDatabaseToDuckDBViaCsv(ConnectionInfo inputConn, ConnectionInfo outputConn, string[] tables)
+        {
+            // Create temp directory for CSV files
+            var tempDir = Path.Combine(Path.GetTempPath(), $"SwarmCopy_{Guid.NewGuid()}");
+            Directory.CreateDirectory(tempDir);
+            Console.WriteLine($"Using temp directory: {tempDir}");
+
+            try
+            {
+                Console.WriteLine($"\nPipelined export and load of {tables.Length} tables...");
+
+                // Track progress
+                int exportedCount = 0;
+                int loadedCount = 0;
+                long totalRowsExported = 0;
+                var exportTimer = new System.Timers.Timer(60000); // 60 seconds
+                var loadTimer = new System.Timers.Timer(60000);
+                string currentLoadingTable = null;
+                var currentLoadStart = DateTime.Now;
+
+                exportTimer.Elapsed += (s, e) =>
+                {
+                    Console.WriteLine($"  [Export Progress] {exportedCount}/{tables.Length} tables, {totalRowsExported:N0} rows exported");
+                };
+                exportTimer.Start();
+
+                loadTimer.Elapsed += (s, e) =>
+                {
+                    if (currentLoadingTable != null)
+                    {
+                        var elapsed = DateTime.Now - currentLoadStart;
+                        Console.WriteLine($"  [Load Progress] Still loading: {currentLoadingTable} - {elapsed.TotalSeconds:F0}s elapsed ({loadedCount}/{tables.Length} tables completed)");
+                    }
+                };
+                loadTimer.Start();
+
+                // Use BlockingCollection for producer-consumer pattern
+                using (var completedTables = new System.Collections.Concurrent.BlockingCollection<string>())
+                {
+                    // Start DuckDB loader task (consumer)
+                    var loadTask = Task.Run(() =>
+                    {
+                        try
+                        {
+                            using (var connection = new DuckDB.NET.Data.DuckDBConnection(outputConn.GetConnectionString()))
+                            {
+                                connection.Open();
+
+                                // Configure DuckDB for performance
+                                using (var configCmd = connection.CreateCommand())
+                                {
+                                    configCmd.CommandText = @"
+                                        PRAGMA memory_limit='8GB';
+                                        PRAGMA threads=24;
+                                    ";
+                                    configCmd.ExecuteNonQuery();
+                                }
+
+                                // Create schema if needed
+                                if (!string.IsNullOrEmpty(outputConn.DbSchema))
+                                {
+                                    using (var cmd = connection.CreateCommand())
+                                    {
+                                        cmd.CommandText = $"CREATE SCHEMA IF NOT EXISTS {outputConn.DbSchema}";
+                                        cmd.ExecuteNonQuery();
+                                    }
+                                }
+
+                                // Load tables as they become available
+                                foreach (var table in completedTables.GetConsumingEnumerable())
+                                {
+                                    try
+                                    {
+                                        currentLoadingTable = table;
+                                        currentLoadStart = DateTime.Now;
+                                        Console.WriteLine($"  Loading: {table}");
+                                        var csvFile = Path.Combine(tempDir, $"{table}.csv");
+                                        var qualifiedTableName = outputConn.GetQualifiedTableName(table);
+
+                                        // Use DuckDB's fast read_csv() bulk load
+                                        using (var cmd = connection.CreateCommand())
+                                        {
+                                            cmd.CommandText = $"CREATE OR REPLACE TABLE {qualifiedTableName} AS SELECT * FROM read_csv('{csvFile.Replace("\\", "\\\\")}', header=true, all_varchar=true)";
+                                            cmd.ExecuteNonQuery();
+                                        }
+
+                                        Interlocked.Increment(ref loadedCount);
+                                        currentLoadingTable = null;
+                                        Console.WriteLine($"  Completed load: {table}");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"  ERROR loading {table}: {ex.Message}");
+                                        currentLoadingTable = null;
+                                        throw;
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"  FATAL ERROR in load task: {ex.Message}");
+                            Console.WriteLine($"  Stack: {ex.StackTrace}");
+                            throw;
+                        }
+                    });
+
+                    // Export tables in parallel (producers)
+                    Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, table =>
+                    {
+                        Console.WriteLine($"  Exporting: {table}");
+                        var csvFile = Path.Combine(tempDir, $"{table}.csv");
+                        var rowCount = CopySingleTableToFile(inputConn, table, csvFile);
+                        Interlocked.Add(ref totalRowsExported, rowCount);
+                        Interlocked.Increment(ref exportedCount);
+                        Console.WriteLine($"  Completed export: {table} ({rowCount:N0} rows)");
+
+                        // Add to queue for loading
+                        completedTables.Add(table);
+                    });
+
+                    // Signal that no more tables will be added
+                    completedTables.CompleteAdding();
+
+                    // Wait for all loads to complete
+                    loadTask.Wait();
+                }
+
+                exportTimer.Stop();
+                loadTimer.Stop();
+                exportTimer.Dispose();
+                loadTimer.Dispose();
+
+                // Verify and display summary
+                Console.WriteLine($"\n=== VERIFICATION SUMMARY ===");
+                Console.WriteLine($"{"Table",-40} {"Exported",-15} {"Loaded",-15} {"Status",-10}");
+                Console.WriteLine(new string('-', 85));
+
+                using (var connection = new DuckDB.NET.Data.DuckDBConnection(outputConn.GetConnectionString()))
+                {
+                    connection.Open();
+
+                    long totalExported = 0;
+                    long totalLoaded = 0;
+                    int mismatches = 0;
+
+                    foreach (var table in tables)
+                    {
+                        // Get exported count from CSV
+                        var csvFile = Path.Combine(tempDir, $"{table}.csv");
+                        long exportedRows = 0;
+                        if (File.Exists(csvFile))
+                        {
+                            exportedRows = File.ReadLines(csvFile).Count() - 1; // -1 for header
+                        }
+
+                        // Get loaded count from DuckDB
+                        var qualifiedTableName = outputConn.GetQualifiedTableName(table);
+                        long loadedRows = 0;
+                        using (var cmd = connection.CreateCommand())
+                        {
+                            cmd.CommandText = $"SELECT COUNT(*) FROM {qualifiedTableName}";
+                            loadedRows = Convert.ToInt64(cmd.ExecuteScalar());
+                        }
+
+                        totalExported += exportedRows;
+                        totalLoaded += loadedRows;
+
+                        var status = exportedRows == loadedRows ? "OK" : "MISMATCH";
+                        if (exportedRows != loadedRows) mismatches++;
+
+                        Console.WriteLine($"{table,-40} {exportedRows,-15:N0} {loadedRows,-15:N0} {status,-10}");
+                    }
+
+                    Console.WriteLine(new string('-', 85));
+                    Console.WriteLine($"{"TOTAL",-40} {totalExported,-15:N0} {totalLoaded,-15:N0} {(mismatches == 0 ? "OK" : $"{mismatches} ERRORS"),-10}");
+                    Console.WriteLine(new string('=', 85));
+                }
+
+                Console.WriteLine($"\nCompleted all {tables.Length} tables");
+            }
+            finally
+            {
+                // Clean up temp CSV files
+                if (Directory.Exists(tempDir))
+                {
+                    Console.WriteLine($"Cleaning up temp directory: {tempDir}");
+                    Directory.Delete(tempDir, true);
+                }
             }
         }
 
@@ -203,18 +412,26 @@ namespace SwarmCopy
             FileWriter.WriteFile(outputFile, rows, columns, delimiter);
         }
 
-        private static void CopySingleTableToFile(ConnectionInfo inputConn, string tableName, string outputFile)
+        private static long CopySingleTableToFile(ConnectionInfo inputConn, string tableName, string outputFile, Action<long> progressCallback = null)
         {
             var columns = DatabaseReader.GetTableColumns(inputConn, tableName);
             var rows = DatabaseReader.ReadTable(inputConn, tableName);
             var delimiter = FileWriter.GetDelimiterFromExtension(outputFile);
 
-            FileWriter.WriteFile(outputFile, rows, columns, delimiter);
+            return FileWriter.WriteFile(outputFile, rows, columns, delimiter, progressCallback);
         }
 
         private static void CopyFileToDatabase(string input, string output)
         {
             var outputConn = ConnectionInfo.Parse(output);
+
+            // Special case: When writing to DuckDB with schema 'dbo', use 'main' instead
+            if (outputConn.IsDuckDb && outputConn.DbSchema == "dbo")
+            {
+                outputConn.DbSchema = "main";
+                Console.WriteLine($"Converting schema from 'dbo' to 'main' for DuckDB");
+            }
+
             var files = GetInputFiles(input);
 
             Console.WriteLine($"Found {files.Length} files to import");

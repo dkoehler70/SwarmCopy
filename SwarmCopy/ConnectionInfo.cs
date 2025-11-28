@@ -15,6 +15,7 @@ namespace SwarmCopy
         public string DbSchema { get; set; } = "dbo";
         public string DbAction { get; set; } = "overwrite";
         public string DbSql { get; set; }
+        public bool IsDuckDb { get; set; }
 
         public bool UseWindowsAuth => string.IsNullOrEmpty(DbUsername) && string.IsNullOrEmpty(DbPassword);
         public bool IsOverwrite => string.IsNullOrEmpty(DbAction) || DbAction.Equals("overwrite", StringComparison.OrdinalIgnoreCase);
@@ -22,11 +23,27 @@ namespace SwarmCopy
 
         public string GetQualifiedTableName(string tableName)
         {
+            if (IsDuckDb)
+            {
+                // DuckDB uses schema.table notation without brackets
+                return $"{DbSchema}.{tableName}";
+            }
             return $"[{DbSchema}].[{tableName}]";
+        }
+
+        public string GetDuckDbFilePath()
+        {
+            return $"{DbName}.db";
         }
 
         public string GetConnectionString()
         {
+            if (IsDuckDb)
+            {
+                // DuckDB connection string format
+                return $"DataSource={GetDuckDbFilePath()}";
+            }
+
             if (UseWindowsAuth)
             {
                 return $"Server={DbHost},{DbPort};Database={DbName};Integrated Security=true;";
@@ -39,12 +56,25 @@ namespace SwarmCopy
 
         public static ConnectionInfo Parse(string connectionString)
         {
-            if (!connectionString.StartsWith("db:", StringComparison.OrdinalIgnoreCase))
+            bool isDuckDb = false;
+            int prefixLength;
+
+            if (connectionString.StartsWith("duck:", StringComparison.OrdinalIgnoreCase))
             {
-                throw new ArgumentException("Database connection string must start with 'db:'");
+                isDuckDb = true;
+                prefixLength = 5;
+            }
+            else if (connectionString.StartsWith("db:", StringComparison.OrdinalIgnoreCase))
+            {
+                isDuckDb = false;
+                prefixLength = 3;
+            }
+            else
+            {
+                throw new ArgumentException("Database connection string must start with 'db:' or 'duck:'");
             }
 
-            var paramString = connectionString.Substring(3);
+            var paramString = connectionString.Substring(prefixLength);
             var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var part in paramString.Split('&'))
@@ -56,7 +86,10 @@ namespace SwarmCopy
                 }
             }
 
-            var connInfo = new ConnectionInfo();
+            var connInfo = new ConnectionInfo
+            {
+                IsDuckDb = isDuckDb
+            };
 
             if (parameters.TryGetValue("dbname", out var dbName))
                 connInfo.DbName = dbName;
@@ -84,6 +117,12 @@ namespace SwarmCopy
 
             if (parameters.TryGetValue("dbsql", out var dbSql))
                 connInfo.DbSql = dbSql;
+
+            // Set default schema based on database type
+            if (string.IsNullOrEmpty(connInfo.DbSchema))
+            {
+                connInfo.DbSchema = isDuckDb ? "main" : "dbo";
+            }
 
             // Validation
             if (string.IsNullOrEmpty(connInfo.DbName))

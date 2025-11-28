@@ -9,13 +9,15 @@ namespace SwarmCopy
 {
     public class FileWriter
     {
-        public static void WriteFile(string filePath, IEnumerable<Dictionary<string, string>> rows, string[] headers, char delimiter = ',')
+        public static long WriteFile(string filePath, IEnumerable<Dictionary<string, string>> rows, string[] headers, char delimiter = ',', Action<long> progressCallback = null, int progressInterval = 10000)
         {
             var config = new CsvConfiguration(CultureInfo.InvariantCulture)
             {
                 Delimiter = delimiter.ToString(),
                 HasHeaderRecord = true
             };
+
+            long rowCount = 0;
 
             using (var writer = new StreamWriter(filePath))
             using (var csv = new CsvWriter(writer, config))
@@ -35,8 +37,23 @@ namespace SwarmCopy
                         csv.WriteField(row.ContainsKey(header) ? row[header] : string.Empty);
                     }
                     csv.NextRecord();
+                    rowCount++;
+
+                    // Call progress callback every N rows
+                    if (progressCallback != null && rowCount % progressInterval == 0)
+                    {
+                        progressCallback(rowCount);
+                    }
                 }
             }
+
+            // Final callback with total count
+            if (progressCallback != null && rowCount % progressInterval != 0)
+            {
+                progressCallback(rowCount);
+            }
+
+            return rowCount;
         }
 
         public static char GetDelimiterFromExtension(string filePath)

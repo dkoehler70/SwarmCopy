@@ -4,6 +4,7 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
 using System.Threading;
+using DuckDB.NET.Data;
 
 namespace SwarmCopy
 {
@@ -14,25 +15,69 @@ namespace SwarmCopy
         private const int MAX_RETRIES = 5;
         private static readonly object ResizeLock = new object(); // Thread-safe column resizing
 
+        private static IDbConnection CreateConnection(ConnectionInfo connInfo)
+        {
+            if (connInfo.IsDuckDb)
+            {
+                return new DuckDBConnection(connInfo.GetConnectionString());
+            }
+            else
+            {
+                return new SqlConnection(connInfo.GetConnectionString());
+            }
+        }
+
         public static void CreateTable(ConnectionInfo connInfo, string tableName, string[] columns)
         {
-            using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+            using (var connection = CreateConnection(connInfo))
             {
                 connection.Open();
 
-                // Drop table if exists
-                var dropQuery = $"IF OBJECT_ID('[{tableName}]', 'U') IS NOT NULL DROP TABLE [{tableName}]";
-                using (var dropCommand = new SqlCommand(dropQuery, connection))
+                // Create schema if DuckDB and schema doesn't exist
+                if (connInfo.IsDuckDb && !string.IsNullOrEmpty(connInfo.DbSchema))
                 {
+                    var createSchemaQuery = $"CREATE SCHEMA IF NOT EXISTS {connInfo.DbSchema}";
+                    using (var schemaCommand = connection.CreateCommand())
+                    {
+                        schemaCommand.CommandText = createSchemaQuery;
+                        schemaCommand.ExecuteNonQuery();
+                    }
+                }
+
+                var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
+
+                // Drop table if exists
+                string dropQuery;
+                if (connInfo.IsDuckDb)
+                {
+                    dropQuery = $"DROP TABLE IF EXISTS {qualifiedTableName}";
+                }
+                else
+                {
+                    dropQuery = $"IF OBJECT_ID('{qualifiedTableName}', 'U') IS NOT NULL DROP TABLE {qualifiedTableName}";
+                }
+
+                using (var dropCommand = connection.CreateCommand())
+                {
+                    dropCommand.CommandText = dropQuery;
                     dropCommand.ExecuteNonQuery();
                 }
 
                 // Create table with all columns as VARCHAR(MAX)
-                var columnDefinitions = string.Join(", ", columns.Select(c => $"[{c}] VARCHAR(MAX) NULL"));
-                var createQuery = $"CREATE TABLE [{tableName}] ({columnDefinitions})";
-
-                using (var createCommand = new SqlCommand(createQuery, connection))
+                string columnDefinitions;
+                if (connInfo.IsDuckDb)
                 {
+                    columnDefinitions = string.Join(", ", columns.Select(c => $"\"{c}\" VARCHAR NULL"));
+                }
+                else
+                {
+                    columnDefinitions = string.Join(", ", columns.Select(c => $"[{c}] VARCHAR(MAX) NULL"));
+                }
+                var createQuery = $"CREATE TABLE {qualifiedTableName} ({columnDefinitions})";
+
+                using (var createCommand = connection.CreateCommand())
+                {
+                    createCommand.CommandText = createQuery;
                     createCommand.ExecuteNonQuery();
                 }
             }
@@ -40,36 +85,67 @@ namespace SwarmCopy
 
         public static void CreateTableWithSizes(ConnectionInfo connInfo, string tableName, Dictionary<string, int> columnSizes)
         {
-            using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+            using (var connection = CreateConnection(connInfo))
             {
                 connection.Open();
+
+                // Create schema if DuckDB and schema doesn't exist
+                if (connInfo.IsDuckDb && !string.IsNullOrEmpty(connInfo.DbSchema))
+                {
+                    var createSchemaQuery = $"CREATE SCHEMA IF NOT EXISTS {connInfo.DbSchema}";
+                    using (var schemaCommand = connection.CreateCommand())
+                    {
+                        schemaCommand.CommandText = createSchemaQuery;
+                        schemaCommand.ExecuteNonQuery();
+                    }
+                }
 
                 var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
 
                 // Drop table if overwrite mode
                 if (connInfo.IsOverwrite)
                 {
-                    var dropQuery = $"IF OBJECT_ID('{qualifiedTableName}', 'U') IS NOT NULL DROP TABLE {qualifiedTableName}";
-                    using (var dropCommand = new SqlCommand(dropQuery, connection))
+                    string dropQuery;
+                    if (connInfo.IsDuckDb)
                     {
+                        dropQuery = $"DROP TABLE IF EXISTS {qualifiedTableName}";
+                    }
+                    else
+                    {
+                        dropQuery = $"IF OBJECT_ID('{qualifiedTableName}', 'U') IS NOT NULL DROP TABLE {qualifiedTableName}";
+                    }
+
+                    using (var dropCommand = connection.CreateCommand())
+                    {
+                        dropCommand.CommandText = dropQuery;
                         dropCommand.ExecuteNonQuery();
                     }
                 }
 
-                // Adjust column sizes to ensure row doesn't exceed 8060 bytes
-                var adjustedSizes = AdjustColumnSizesForRowLimit(columnSizes);
+                // Adjust column sizes to ensure row doesn't exceed 8060 bytes (SQL Server only)
+                var adjustedSizes = connInfo.IsDuckDb ? columnSizes : AdjustColumnSizesForRowLimit(columnSizes);
 
                 // Create table with specified column sizes
-                // Use VARCHAR(MAX) for columns >= 512 chars or adjusted to MAX
-                var columnDefinitions = string.Join(", ", adjustedSizes.Select(kvp =>
+                string columnDefinitions;
+                if (connInfo.IsDuckDb)
                 {
-                    var size = kvp.Value >= MAX_THRESHOLD || kvp.Value == int.MaxValue ? "MAX" : kvp.Value.ToString();
-                    return $"[{kvp.Key}] VARCHAR({size}) NULL";
-                }));
+                    // DuckDB: VARCHAR without size specification, quote column names for special characters
+                    columnDefinitions = string.Join(", ", adjustedSizes.Select(kvp => $"\"{kvp.Key}\" VARCHAR NULL"));
+                }
+                else
+                {
+                    // SQL Server: Use VARCHAR(MAX) for columns >= 512 chars or adjusted to MAX
+                    columnDefinitions = string.Join(", ", adjustedSizes.Select(kvp =>
+                    {
+                        var size = kvp.Value >= MAX_THRESHOLD || kvp.Value == int.MaxValue ? "MAX" : kvp.Value.ToString();
+                        return $"[{kvp.Key}] VARCHAR({size}) NULL";
+                    }));
+                }
                 var createQuery = $"CREATE TABLE {qualifiedTableName} ({columnDefinitions})";
 
-                using (var createCommand = new SqlCommand(createQuery, connection))
+                using (var createCommand = connection.CreateCommand())
                 {
+                    createCommand.CommandText = createQuery;
                     createCommand.ExecuteNonQuery();
                 }
             }
@@ -107,10 +183,16 @@ namespace SwarmCopy
 
         public static void ResizeColumn(ConnectionInfo connInfo, string tableName, string columnName, int newSize)
         {
+            if (connInfo.IsDuckDb)
+            {
+                // DuckDB doesn't need column resizing - VARCHAR is flexible
+                return;
+            }
+
             // Thread-safe: Lock to prevent concurrent ALTER TABLE operations
             lock (ResizeLock)
             {
-                using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+                using (var connection = CreateConnection(connInfo))
                 {
                     connection.Open();
 
@@ -134,8 +216,9 @@ namespace SwarmCopy
 
                     Console.WriteLine($"  Resizing column [{tableName}].[{columnName}]: {oldSize} -> {size}");
 
-                    using (var command = new SqlCommand(alterQuery, connection))
+                    using (var command = connection.CreateCommand())
                     {
+                        command.CommandText = alterQuery;
                         command.CommandTimeout = 120; // 2 minute timeout for ALTER TABLE
                         command.ExecuteNonQuery();
                     }
@@ -147,7 +230,18 @@ namespace SwarmCopy
         {
             var columnSizes = new Dictionary<string, int>();
 
-            using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+            if (connInfo.IsDuckDb)
+            {
+                // DuckDB VARCHAR is flexible, return int.MaxValue for all columns
+                var columns = DatabaseReader.GetTableColumns(connInfo, tableName);
+                foreach (var column in columns)
+                {
+                    columnSizes[column] = int.MaxValue;
+                }
+                return columnSizes;
+            }
+
+            using (var connection = CreateConnection(connInfo))
             {
                 connection.Open();
 
@@ -157,10 +251,12 @@ namespace SwarmCopy
                     WHERE TABLE_SCHEMA = @TableSchema AND TABLE_NAME = @TableName
                     ORDER BY ORDINAL_POSITION";
 
-                using (var command = new SqlCommand(query, connection))
+                using (var command = connection.CreateCommand())
                 {
-                    command.Parameters.AddWithValue("@TableSchema", connInfo.DbSchema);
-                    command.Parameters.AddWithValue("@TableName", tableName);
+                    command.CommandText = query;
+                    var sqlCommand = command as SqlCommand;
+                    sqlCommand.Parameters.AddWithValue("@TableSchema", connInfo.DbSchema);
+                    sqlCommand.Parameters.AddWithValue("@TableName", tableName);
 
                     using (var reader = command.ExecuteReader())
                     {
@@ -182,8 +278,15 @@ namespace SwarmCopy
             BulkInsertWithSizing(connInfo, tableName, rows, columns, null);
         }
 
-        public static void BulkInsertWithSizing(ConnectionInfo connInfo, string tableName, IEnumerable<Dictionary<string, string>> rows, string[] columns, Dictionary<string, int> initialSizes)
+        public static void BulkInsertWithSizing(ConnectionInfo connInfo, string tableName, IEnumerable<Dictionary<string, string>> rows, string[] columns, Dictionary<string, int> initialSizes, Action<long> progressCallback = null)
         {
+            if (connInfo.IsDuckDb)
+            {
+                // DuckDB: Use AppendMany for bulk insert
+                BulkInsertDuckDB(connInfo, tableName, rows, columns, progressCallback);
+                return;
+            }
+
             using (var connection = new SqlConnection(connInfo.GetConnectionString()))
             {
                 connection.Open();
@@ -215,6 +318,116 @@ namespace SwarmCopy
                 if (batchRows.Count > 0)
                 {
                     InsertBatchWithResize(connInfo, connection, tableName, batchRows, columns, dataTable, currentSizes);
+                }
+            }
+        }
+
+        private static void BulkInsertDuckDB(ConnectionInfo connInfo, string tableName, IEnumerable<Dictionary<string, string>> rows, string[] columns, Action<long> progressCallback = null)
+        {
+            using (var connection = new DuckDBConnection(connInfo.GetConnectionString()))
+            {
+                connection.Open();
+
+                // Configure DuckDB for better write performance
+                using (var configCmd = connection.CreateCommand())
+                {
+                    configCmd.CommandText = @"
+                        PRAGMA memory_limit='8GB';
+                        PRAGMA threads=24;
+                        PRAGMA checkpoint_threshold='1GB';
+                    ";
+                    configCmd.ExecuteNonQuery();
+                }
+
+                var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
+                var columnList = string.Join(", ", columns.Select(c => $"\"{c}\""));
+                var paramPlaceholders = string.Join(", ", columns.Select((_, i) => $"${i + 1}"));
+                var insertQuery = $"INSERT INTO {qualifiedTableName} ({columnList}) VALUES ({paramPlaceholders})";
+
+                var batchRows = new List<Dictionary<string, string>>();
+                long totalRows = 0;
+
+                foreach (var row in rows)
+                {
+                    batchRows.Add(row);
+
+                    // Insert in batches (large batch size to reduce lock contention)
+                    if (batchRows.Count >= 500000)
+                    {
+                        InsertBatchDuckDB(connection, insertQuery, batchRows, columns, connInfo, tableName);
+                        totalRows += batchRows.Count;
+                        if (progressCallback != null)
+                        {
+                            progressCallback(totalRows);
+                        }
+                        batchRows.Clear();
+                    }
+                }
+
+                // Insert remaining rows
+                if (batchRows.Count > 0)
+                {
+                    InsertBatchDuckDB(connection, insertQuery, batchRows, columns, connInfo, tableName);
+                    totalRows += batchRows.Count;
+                    if (progressCallback != null)
+                    {
+                        progressCallback(totalRows);
+                    }
+                }
+            }
+        }
+
+        private static void InsertBatchDuckDB(DuckDBConnection connection, string insertQuery, List<Dictionary<string, string>> batchRows, string[] columns, ConnectionInfo connInfo, string tableName)
+        {
+            // Try to use Appender API for faster bulk inserts
+            try
+            {
+                // For DuckDB Appender, set the schema first, then use unqualified table name
+                using (var schemaCommand = connection.CreateCommand())
+                {
+                    schemaCommand.CommandText = $"SET schema = '{connInfo.DbSchema}'";
+                    schemaCommand.ExecuteNonQuery();
+                }
+
+                using (var appender = connection.CreateAppender(tableName))
+                {
+                    foreach (var row in batchRows)
+                    {
+                        var rowAppender = appender.CreateRow();
+                        foreach (var column in columns)
+                        {
+                            var value = row.ContainsKey(column) && !string.IsNullOrEmpty(row[column]) ? row[column] : null;
+                            rowAppender.AppendValue(value);
+                        }
+                        rowAppender.EndRow();
+                    }
+                    appender.Close();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Appender failed ({ex.Message}), falling back to INSERT statements");
+
+                // Fallback to parameterized inserts if Appender not available
+                using (var transaction = connection.BeginTransaction())
+                {
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = insertQuery;
+
+                        foreach (var row in batchRows)
+                        {
+                            command.Parameters.Clear();
+                            foreach (var column in columns)
+                            {
+                                var param = command.CreateParameter();
+                                param.Value = row.ContainsKey(column) && !string.IsNullOrEmpty(row[column]) ? (object)row[column] : DBNull.Value;
+                                command.Parameters.Add(param);
+                            }
+                            command.ExecuteNonQuery();
+                        }
+                    }
+                    transaction.Commit();
                 }
             }
         }
@@ -368,13 +581,24 @@ namespace SwarmCopy
 
         public static void TruncateTable(ConnectionInfo connInfo, string tableName)
         {
-            using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+            using (var connection = CreateConnection(connInfo))
             {
                 connection.Open();
 
-                var query = $"TRUNCATE TABLE [{tableName}]";
-                using (var command = new SqlCommand(query, connection))
+                var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
+                string query;
+                if (connInfo.IsDuckDb)
                 {
+                    query = $"DELETE FROM {qualifiedTableName}";
+                }
+                else
+                {
+                    query = $"TRUNCATE TABLE {qualifiedTableName}";
+                }
+
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = query;
                     command.ExecuteNonQuery();
                 }
             }
@@ -395,14 +619,25 @@ namespace SwarmCopy
                 if (missingColumns.Length > 0)
                 {
                     // Add missing columns
-                    using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+                    var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
+                    using (var connection = CreateConnection(connInfo))
                     {
                         connection.Open();
                         foreach (var column in missingColumns)
                         {
-                            var alterQuery = $"ALTER TABLE [{tableName}] ADD [{column}] VARCHAR(MAX) NULL";
-                            using (var command = new SqlCommand(alterQuery, connection))
+                            string alterQuery;
+                            if (connInfo.IsDuckDb)
                             {
+                                alterQuery = $"ALTER TABLE {qualifiedTableName} ADD COLUMN \"{column}\" VARCHAR NULL";
+                            }
+                            else
+                            {
+                                alterQuery = $"ALTER TABLE {qualifiedTableName} ADD [{column}] VARCHAR(MAX) NULL";
+                            }
+
+                            using (var command = connection.CreateCommand())
+                            {
+                                command.CommandText = alterQuery;
                                 command.ExecuteNonQuery();
                             }
                         }
@@ -435,16 +670,26 @@ namespace SwarmCopy
                 {
                     // Add missing columns
                     var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
-                    using (var connection = new SqlConnection(connInfo.GetConnectionString()))
+                    using (var connection = CreateConnection(connInfo))
                     {
                         connection.Open();
                         foreach (var column in missingColumns)
                         {
-                            // Use VARCHAR(MAX) for columns >= 512 chars
-                            var size = columnSizes[column] >= MAX_THRESHOLD || columnSizes[column] == int.MaxValue ? "MAX" : columnSizes[column].ToString();
-                            var alterQuery = $"ALTER TABLE {qualifiedTableName} ADD [{column}] VARCHAR({size}) NULL";
-                            using (var command = new SqlCommand(alterQuery, connection))
+                            string alterQuery;
+                            if (connInfo.IsDuckDb)
                             {
+                                alterQuery = $"ALTER TABLE {qualifiedTableName} ADD COLUMN \"{column}\" VARCHAR NULL";
+                            }
+                            else
+                            {
+                                // Use VARCHAR(MAX) for columns >= 512 chars
+                                var size = columnSizes[column] >= MAX_THRESHOLD || columnSizes[column] == int.MaxValue ? "MAX" : columnSizes[column].ToString();
+                                alterQuery = $"ALTER TABLE {qualifiedTableName} ADD [{column}] VARCHAR({size}) NULL";
+                            }
+
+                            using (var command = connection.CreateCommand())
+                            {
+                                command.CommandText = alterQuery;
                                 command.ExecuteNonQuery();
                             }
                         }

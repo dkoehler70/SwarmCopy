@@ -446,28 +446,70 @@ namespace SwarmCopy
             }
             else
             {
-                // Multiple files
-                Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, file =>
+                // Multiple files - check if going to same table or different tables
+                var singleTargetTable = !string.IsNullOrEmpty(outputConn.DbTable);
+
+                if (singleTargetTable)
                 {
-                    var tableName = string.IsNullOrEmpty(outputConn.DbTable) ? Path.GetFileNameWithoutExtension(file) : outputConn.DbTable;
-                    Console.WriteLine($"Importing: {file} -> {tableName}");
-                    CopySingleFileToTable(file, outputConn, tableName);
-                    Console.WriteLine($"Completed: {file}");
-                });
+                    // All files go to same table - create table once, then parallel load
+                    var tableName = outputConn.DbTable;
+                    Console.WriteLine($"Loading {files.Length} files to single table: {tableName}");
+
+                    // Sample first file to create table structure
+                    Console.WriteLine($"  Sampling first file to determine column sizes...");
+                    var columnSizes = DelimitedFileReader.SampleColumnSizes(files[0], sampleSize: 100, buffer: 10);
+
+                    // Create table once
+                    Console.WriteLine($"  Creating table with {columnSizes.Count} columns...");
+                    DatabaseWriter.EnsureTableExistsWithSizes(outputConn, tableName, columnSizes);
+
+                    // Now load all files in parallel (skip table creation)
+                    Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, file =>
+                    {
+                        Console.WriteLine($"Importing: {file} -> {tableName}");
+                        CopySingleFileToTable(file, outputConn, tableName, skipTableCreation: true);
+                        Console.WriteLine($"Completed: {file}");
+                    });
+                }
+                else
+                {
+                    // Each file goes to its own table (named after the file)
+                    Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, file =>
+                    {
+                        var tableName = Path.GetFileNameWithoutExtension(file);
+                        Console.WriteLine($"Importing: {file} -> {tableName}");
+                        CopySingleFileToTable(file, outputConn, tableName);
+                        Console.WriteLine($"Completed: {file}");
+                    });
+                }
             }
         }
 
-        private static void CopySingleFileToTable(string inputFile, ConnectionInfo outputConn, string tableName)
+        private static void CopySingleFileToTable(string inputFile, ConnectionInfo outputConn, string tableName, bool skipTableCreation = false)
         {
-            // Sample first 100 rows to determine column sizes
-            Console.WriteLine($"  Sampling file to determine column sizes...");
-            var columnSizes = DelimitedFileReader.SampleColumnSizes(inputFile, sampleSize: 100, buffer: 10);
+            Dictionary<string, int> columnSizes;
+            string[] headers;
 
-            Console.WriteLine($"  Creating/updating table with {columnSizes.Count} columns...");
-            DatabaseWriter.EnsureTableExistsWithSizes(outputConn, tableName, columnSizes);
+            if (!skipTableCreation)
+            {
+                // Sample first 100 rows to determine column sizes
+                Console.WriteLine($"  Sampling file to determine column sizes...");
+                columnSizes = DelimitedFileReader.SampleColumnSizes(inputFile, sampleSize: 100, buffer: 10);
+
+                Console.WriteLine($"  Creating/updating table with {columnSizes.Count} columns...");
+                DatabaseWriter.EnsureTableExistsWithSizes(outputConn, tableName, columnSizes);
+
+                headers = columnSizes.Keys.ToArray();
+            }
+            else
+            {
+                // Table already exists - just get column info from first row
+                var firstRow = DelimitedFileReader.ReadFile(inputFile).First();
+                headers = firstRow.Keys.ToArray();
+                columnSizes = headers.ToDictionary(h => h, h => 0); // Sizes don't matter since table exists
+            }
 
             // Now read and insert all rows
-            var headers = columnSizes.Keys.ToArray();
             var rows = DelimitedFileReader.ReadFile(inputFile);
 
             Console.WriteLine($"  Bulk inserting data...");

@@ -27,7 +27,35 @@ namespace SwarmCopy.Tests
 
         public void Dispose()
         {
-            // Clean up output directory
+            // Clean up SQL Server test tables
+            if (_sqlServerAvailable)
+            {
+                try
+                {
+                    var connInfo = ConnectionInfo.Parse(_sqlServerConnString);
+                    using (var conn = new System.Data.SqlClient.SqlConnection(connInfo.GetConnectionString()))
+                    {
+                        conn.Open();
+                        using (var cmd = conn.CreateCommand())
+                        {
+                            // Drop all test tables (including temp tables)
+                            cmd.CommandText = @"
+                                DECLARE @sql NVARCHAR(MAX) = N'';
+                                SELECT @sql += N'DROP TABLE IF EXISTS [dbo].[' + name + N'];'
+                                FROM sys.tables
+                                WHERE name LIKE 'test%' OR name LIKE '%_TMP';
+                                EXEC sp_executesql @sql;";
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                }
+                catch
+                {
+                    // Ignore cleanup errors
+                }
+            }
+
+            // Clean up output directory (includes DuckDB files)
             if (Directory.Exists(_outputDir))
             {
                 Directory.Delete(_outputDir, true);

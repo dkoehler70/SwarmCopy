@@ -164,13 +164,58 @@ namespace SwarmCopy
                                         currentLoadStart = DateTime.Now;
                                         Console.WriteLine($"  Loading: {table}");
                                         var csvFile = Path.Combine(tempDir, $"{table}.csv");
-                                        var qualifiedTableName = outputConn.GetQualifiedTableName(table);
+
+                                        // Check create mode - fail if table already exists
+                                        if (outputConn.IsCreate && DatabaseReader.TableExists(outputConn, table))
+                                        {
+                                            throw new InvalidOperationException($"Table '{table}' already exists. Use dbaction=overwrite to replace it or dbaction=append to add to it.");
+                                        }
+
+                                        // For create/overwrite modes, use temp table pattern
+                                        string targetTable = table;
+                                        if (outputConn.IsCreate || outputConn.IsOverwrite)
+                                        {
+                                            targetTable = table + "_TMP";
+                                            var tempTableName = outputConn.GetQualifiedTableName(targetTable);
+
+                                            // Clean up any existing temp table
+                                            using (var dropCmd = connection.CreateCommand())
+                                            {
+                                                dropCmd.CommandText = $"DROP TABLE IF EXISTS {tempTableName}";
+                                                dropCmd.ExecuteNonQuery();
+                                            }
+                                        }
+
+                                        var qualifiedTableName = outputConn.GetQualifiedTableName(targetTable);
 
                                         // Use DuckDB's fast read_csv() bulk load
                                         using (var cmd = connection.CreateCommand())
                                         {
                                             cmd.CommandText = $"CREATE OR REPLACE TABLE {qualifiedTableName} AS SELECT * FROM read_csv('{csvFile.Replace("\\", "\\\\")}', header=true, all_varchar=true)";
                                             cmd.ExecuteNonQuery();
+                                        }
+
+                                        // For create/overwrite modes, commit the temp table
+                                        if (outputConn.IsCreate || outputConn.IsOverwrite)
+                                        {
+                                            if (outputConn.IsOverwrite && DatabaseReader.TableExists(outputConn, table))
+                                            {
+                                                Console.WriteLine($"  Dropping existing table: {table}");
+                                                var finalTableName = outputConn.GetQualifiedTableName(table);
+                                                using (var dropCmd = connection.CreateCommand())
+                                                {
+                                                    dropCmd.CommandText = $"DROP TABLE IF EXISTS {finalTableName}";
+                                                    dropCmd.ExecuteNonQuery();
+                                                }
+                                            }
+
+                                            Console.WriteLine($"  Committing temp table: {targetTable} -> {table}");
+                                            var tempQualifiedName = outputConn.GetQualifiedTableName(targetTable);
+                                            using (var renameCmd = connection.CreateCommand())
+                                            {
+                                                renameCmd.CommandText = $"ALTER TABLE {tempQualifiedName} RENAME TO {table}";
+                                                renameCmd.ExecuteNonQuery();
+                                            }
                                         }
 
                                         Interlocked.Increment(ref loadedCount);
@@ -470,6 +515,12 @@ namespace SwarmCopy
                         CopySingleFileToTable(file, outputConn, tableName, skipTableCreation: true);
                         Console.WriteLine($"Completed: {file}");
                     });
+
+                    // For create/overwrite modes, commit the temp table after all files are loaded
+                    if (outputConn.IsCreate || outputConn.IsOverwrite)
+                    {
+                        DatabaseWriter.CommitTempTable(outputConn, tableName);
+                    }
                 }
                 else
                 {
@@ -509,6 +560,10 @@ namespace SwarmCopy
                 columnSizes = headers.ToDictionary(h => h, h => 0); // Sizes don't matter since table exists
             }
 
+            // Determine the target table name for bulk insert
+            // For create/overwrite modes, write to temp table first
+            var targetTableName = (outputConn.IsCreate || outputConn.IsOverwrite) ? tableName + "_TMP" : tableName;
+
             // Now read and insert all rows
             var rows = DelimitedFileReader.ReadFile(inputFile);
 
@@ -523,7 +578,7 @@ namespace SwarmCopy
 
                     if (batch.Count >= 10000)
                     {
-                        DatabaseWriter.BulkInsertWithSizing(outputConn, tableName, batch, headers, columnSizes);
+                        DatabaseWriter.BulkInsertWithSizing(outputConn, targetTableName, batch, headers, columnSizes);
                         progress.IncrementRows(batch.Count);
                         batch.Clear();
                     }
@@ -531,9 +586,16 @@ namespace SwarmCopy
 
                 if (batch.Count > 0)
                 {
-                    DatabaseWriter.BulkInsertWithSizing(outputConn, tableName, batch, headers, columnSizes);
+                    DatabaseWriter.BulkInsertWithSizing(outputConn, targetTableName, batch, headers, columnSizes);
                     progress.IncrementRows(batch.Count);
                 }
+            }
+
+            // For create/overwrite modes, commit the temp table
+            // Only commit if we actually created the table (not if we skipped table creation)
+            if (!skipTableCreation && (outputConn.IsCreate || outputConn.IsOverwrite))
+            {
+                DatabaseWriter.CommitTempTable(outputConn, tableName);
             }
         }
 

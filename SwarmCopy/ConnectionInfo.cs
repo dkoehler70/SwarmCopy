@@ -20,6 +20,7 @@ namespace SwarmCopy
         public bool UseWindowsAuth => string.IsNullOrEmpty(DbUsername) && string.IsNullOrEmpty(DbPassword);
         public bool IsOverwrite => string.IsNullOrEmpty(DbAction) || DbAction.Equals("overwrite", StringComparison.OrdinalIgnoreCase);
         public bool IsAppend => DbAction != null && DbAction.Equals("append", StringComparison.OrdinalIgnoreCase);
+        public bool IsCreate => DbAction != null && DbAction.Equals("create", StringComparison.OrdinalIgnoreCase);
 
         public string GetQualifiedTableName(string tableName)
         {
@@ -139,9 +140,10 @@ namespace SwarmCopy
             // Validate dbaction
             if (!string.IsNullOrEmpty(connInfo.DbAction) &&
                 !connInfo.DbAction.Equals("overwrite", StringComparison.OrdinalIgnoreCase) &&
-                !connInfo.DbAction.Equals("append", StringComparison.OrdinalIgnoreCase))
+                !connInfo.DbAction.Equals("append", StringComparison.OrdinalIgnoreCase) &&
+                !connInfo.DbAction.Equals("create", StringComparison.OrdinalIgnoreCase))
             {
-                throw new ArgumentException("dbaction must be either 'overwrite' or 'append'");
+                throw new ArgumentException("dbaction must be 'overwrite', 'append', or 'create'");
             }
 
             return connInfo;

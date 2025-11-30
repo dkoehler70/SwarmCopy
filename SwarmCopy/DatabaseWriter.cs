@@ -646,18 +646,89 @@ namespace SwarmCopy
             }
         }
 
+        public static void DropTempTable(ConnectionInfo connInfo, string tableName)
+        {
+            var tempTableName = tableName + "_TMP";
+            var qualifiedTempTableName = connInfo.GetQualifiedTableName(tempTableName);
+
+            using (var connection = CreateConnection(connInfo))
+            {
+                connection.Open();
+
+                string dropQuery;
+                if (connInfo.IsDuckDb)
+                {
+                    dropQuery = $"DROP TABLE IF EXISTS {qualifiedTempTableName}";
+                }
+                else
+                {
+                    dropQuery = $"IF OBJECT_ID('{qualifiedTempTableName}', 'U') IS NOT NULL DROP TABLE {qualifiedTempTableName}";
+                }
+
+                using (var dropCommand = connection.CreateCommand())
+                {
+                    dropCommand.CommandText = dropQuery;
+                    dropCommand.ExecuteNonQuery();
+                }
+            }
+        }
+
+        public static void RenameTable(ConnectionInfo connInfo, string sourceTableName, string destTableName)
+        {
+            var qualifiedSourceTableName = connInfo.GetQualifiedTableName(sourceTableName);
+            var qualifiedDestTableName = connInfo.GetQualifiedTableName(destTableName);
+
+            using (var connection = CreateConnection(connInfo))
+            {
+                connection.Open();
+
+                string renameQuery;
+                if (connInfo.IsDuckDb)
+                {
+                    renameQuery = $"ALTER TABLE {qualifiedSourceTableName} RENAME TO {destTableName}";
+                }
+                else
+                {
+                    renameQuery = $"EXEC sp_rename '{qualifiedSourceTableName}', '{destTableName}'";
+                }
+
+                using (var renameCommand = connection.CreateCommand())
+                {
+                    renameCommand.CommandText = renameQuery;
+                    renameCommand.ExecuteNonQuery();
+                }
+            }
+        }
+
         public static void EnsureTableExistsWithSizes(ConnectionInfo connInfo, string tableName, Dictionary<string, int> columnSizes)
         {
             var tableExists = DatabaseReader.TableExists(connInfo, tableName);
 
-            if (!tableExists)
+            // Check create mode - fail if table already exists
+            if (connInfo.IsCreate && tableExists)
             {
-                // Table doesn't exist - create it
-                CreateTableWithSizes(connInfo, tableName, columnSizes);
+                throw new InvalidOperationException($"Table '{tableName}' already exists. Use dbaction=overwrite to replace it or dbaction=append to add to it.");
             }
-            else if (connInfo.IsOverwrite)
+
+            // For create and overwrite modes, use temp table pattern
+            if (connInfo.IsCreate || connInfo.IsOverwrite)
             {
-                // Table exists and we're in overwrite mode - drop and recreate
+                var tempTableName = tableName + "_TMP";
+
+                // Clean up any existing temp table from previous failed run
+                Console.WriteLine($"  Cleaning up any existing temp table: {tempTableName}");
+                DropTempTable(connInfo, tableName);
+
+                // Create the temp table
+                Console.WriteLine($"  Creating temp table: {tempTableName}");
+                CreateTableWithSizes(connInfo, tempTableName, columnSizes);
+
+                // Note: The actual table will be renamed from temp after successful data load
+                // This is handled by the caller using CommitTempTable
+            }
+            else if (!tableExists)
+            {
+                // Table doesn't exist and we're in append mode - create it
                 CreateTableWithSizes(connInfo, tableName, columnSizes);
             }
             else
@@ -696,6 +767,43 @@ namespace SwarmCopy
                     }
                 }
             }
+        }
+
+        public static void CommitTempTable(ConnectionInfo connInfo, string tableName)
+        {
+            var tempTableName = tableName + "_TMP";
+
+            // For overwrite mode, drop the existing table first
+            if (connInfo.IsOverwrite && DatabaseReader.TableExists(connInfo, tableName))
+            {
+                Console.WriteLine($"  Dropping existing table: {tableName}");
+                var qualifiedTableName = connInfo.GetQualifiedTableName(tableName);
+
+                using (var connection = CreateConnection(connInfo))
+                {
+                    connection.Open();
+
+                    string dropQuery;
+                    if (connInfo.IsDuckDb)
+                    {
+                        dropQuery = $"DROP TABLE IF EXISTS {qualifiedTableName}";
+                    }
+                    else
+                    {
+                        dropQuery = $"IF OBJECT_ID('{qualifiedTableName}', 'U') IS NOT NULL DROP TABLE {qualifiedTableName}";
+                    }
+
+                    using (var dropCommand = connection.CreateCommand())
+                    {
+                        dropCommand.CommandText = dropQuery;
+                        dropCommand.ExecuteNonQuery();
+                    }
+                }
+            }
+
+            // Rename temp table to final table
+            Console.WriteLine($"  Committing temp table: {tempTableName} -> {tableName}");
+            RenameTable(connInfo, tempTableName, tableName);
         }
     }
 }

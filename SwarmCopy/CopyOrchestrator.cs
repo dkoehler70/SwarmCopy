@@ -360,6 +360,10 @@ namespace SwarmCopy
             // Create or ensure destination table exists with proper sizes
             DatabaseWriter.EnsureTableExistsWithSizes(outputConn, outputTable, targetSizes);
 
+            // Determine the target table name for bulk insert
+            // For create/overwrite modes, write to temp table first
+            var targetTableName = (outputConn.IsCreate || outputConn.IsOverwrite) ? outputTable + "_TMP" : outputTable;
+
             // Multi-threaded copy using binary_checksum partitioning
             var tasks = new List<Task>();
 
@@ -380,7 +384,7 @@ namespace SwarmCopy
                             // Batch inserts
                             if (rowList.Count >= 10000)
                             {
-                                DatabaseWriter.BulkInsertWithSizing(outputConn, outputTable, rowList, columns, targetSizes);
+                                DatabaseWriter.BulkInsertWithSizing(outputConn, targetTableName, rowList, columns, targetSizes);
                                 progress.IncrementRows(rowList.Count);
                                 rowList.Clear();
                             }
@@ -388,7 +392,7 @@ namespace SwarmCopy
 
                         if (rowList.Count > 0)
                         {
-                            DatabaseWriter.BulkInsertWithSizing(outputConn, outputTable, rowList, columns, targetSizes);
+                            DatabaseWriter.BulkInsertWithSizing(outputConn, targetTableName, rowList, columns, targetSizes);
                             progress.IncrementRows(rowList.Count);
                         }
 
@@ -399,6 +403,12 @@ namespace SwarmCopy
                 }
 
                 Task.WaitAll(tasks.ToArray());
+            }
+
+            // For create/overwrite modes, commit the temp table
+            if (outputConn.IsCreate || outputConn.IsOverwrite)
+            {
+                DatabaseWriter.CommitTempTable(outputConn, outputTable);
             }
         }
 

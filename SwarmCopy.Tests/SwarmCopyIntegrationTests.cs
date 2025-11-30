@@ -404,5 +404,138 @@ namespace SwarmCopy.Tests
             var rows = DatabaseReader.ReadTable(connInfo, "test15_combined").ToList();
             Assert.Equal(6, rows.Count);
         }
+
+        // Test 16: DuckDB overwrite mode
+        [Fact]
+        public void Test16_DuckDBOverwriteMode()
+        {
+            var duckDbFile = Path.Combine(_outputDir, "test16.db");
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"duck:dbname={duckDbFile}&dbschema=main&dbtable=test16_overwrite&dbaction=overwrite";
+
+            // First import
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows1 = DatabaseReader.ReadTable(connInfo, "test16_overwrite").ToList();
+            Assert.Equal(3, rows1.Count);
+
+            // Second import with overwrite - should replace data
+            RunSwarmCopy(csvFile, output);
+            var rows2 = DatabaseReader.ReadTable(connInfo, "test16_overwrite").ToList();
+            Assert.Equal(3, rows2.Count); // Still 3 rows, not 6
+        }
+
+        // Test 17: DuckDB append mode
+        [Fact]
+        public void Test17_DuckDBAppendMode()
+        {
+            var duckDbFile = Path.Combine(_outputDir, "test17.db");
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"duck:dbname={duckDbFile}&dbschema=main&dbtable=test17_append&dbaction=append";
+
+            // First import
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows1 = DatabaseReader.ReadTable(connInfo, "test17_append").ToList();
+            Assert.Equal(3, rows1.Count);
+
+            // Second import with append - should add data
+            RunSwarmCopy(csvFile, output);
+            var rows2 = DatabaseReader.ReadTable(connInfo, "test17_append").ToList();
+            Assert.Equal(6, rows2.Count); // 3 + 3 = 6 rows
+        }
+
+        // Test 18: DuckDB create mode
+        [Fact]
+        public void Test18_DuckDBCreateMode()
+        {
+            var duckDbFile = Path.Combine(_outputDir, "test18.db");
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"duck:dbname={duckDbFile}&dbschema=main&dbtable=test18_create&dbaction=create";
+
+            // First import with create mode - should succeed
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows = DatabaseReader.ReadTable(connInfo, "test18_create").ToList();
+            Assert.Equal(3, rows.Count);
+
+            // Second import with create mode - should fail
+            var exception = Assert.Throws<InvalidOperationException>(() => RunSwarmCopy(csvFile, output));
+            Assert.Contains("already exists", exception.Message);
+        }
+
+        // Test 19: SQL Server overwrite mode
+        [Fact]
+        public void Test19_SqlServerOverwriteMode()
+        {
+            if (!_sqlServerAvailable)
+            {
+                Assert.True(true, "SQL Server not available - test skipped");
+                return;
+            }
+
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"{_sqlServerConnString}&dbtable=test19_overwrite&dbaction=overwrite";
+
+            // First import
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows1 = DatabaseReader.ReadTable(connInfo, "test19_overwrite").ToList();
+            Assert.Equal(3, rows1.Count);
+
+            // Second import with overwrite - should replace data
+            RunSwarmCopy(csvFile, output);
+            var rows2 = DatabaseReader.ReadTable(connInfo, "test19_overwrite").ToList();
+            Assert.Equal(3, rows2.Count); // Still 3 rows, not 6
+        }
+
+        // Test 20: SQL Server append mode
+        [Fact]
+        public void Test20_SqlServerAppendMode()
+        {
+            if (!_sqlServerAvailable)
+            {
+                Assert.True(true, "SQL Server not available - test skipped");
+                return;
+            }
+
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"{_sqlServerConnString}&dbtable=test20_append&dbaction=append";
+
+            // First import
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows1 = DatabaseReader.ReadTable(connInfo, "test20_append").ToList();
+            Assert.Equal(3, rows1.Count);
+
+            // Second import with append - should add data
+            RunSwarmCopy(csvFile, output);
+            var rows2 = DatabaseReader.ReadTable(connInfo, "test20_append").ToList();
+            Assert.Equal(6, rows2.Count); // 3 + 3 = 6 rows
+        }
+
+        // Test 21: SQL Server create mode
+        [Fact]
+        public void Test21_SqlServerCreateMode()
+        {
+            if (!_sqlServerAvailable)
+            {
+                Assert.True(true, "SQL Server not available - test skipped");
+                return;
+            }
+
+            var csvFile = Path.Combine(_testDataDir, "test1.csv");
+            var output = $"{_sqlServerConnString}&dbtable=test21_create&dbaction=create";
+
+            // First import with create mode - should succeed
+            RunSwarmCopy(csvFile, output);
+            var connInfo = ConnectionInfo.Parse(output);
+            var rows = DatabaseReader.ReadTable(connInfo, "test21_create").ToList();
+            Assert.Equal(3, rows.Count);
+
+            // Second import with create mode - should fail
+            var exception = Assert.Throws<InvalidOperationException>(() => RunSwarmCopy(csvFile, output));
+            Assert.Contains("already exists", exception.Message);
+        }
     }
 }

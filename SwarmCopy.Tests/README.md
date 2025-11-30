@@ -1,6 +1,6 @@
 # SwarmCopy Integration Tests
 
-This project contains 15 comprehensive integration tests covering all major SwarmCopy scenarios.
+This project contains 21 comprehensive integration tests covering all major SwarmCopy scenarios.
 
 ## Test Scenarios
 
@@ -19,6 +19,12 @@ This project contains 15 comprehensive integration tests covering all major Swar
 13. **Test13_SqlServerQueryToDuckDB** - SQL Server SQL query to DuckDB table
 14. **Test14_MultipleCsvToSqlServerSingleTable** - Multiple CSV files concatenated to single SQL Server table
 15. **Test15_MultipleCsvToDuckDBSingleTable** - Multiple CSV files concatenated to single DuckDB table
+16. **Test16_DuckDBOverwriteMode** - DuckDB overwrite mode (replaces existing data)
+17. **Test17_DuckDBAppendMode** - DuckDB append mode (adds to existing data)
+18. **Test18_DuckDBCreateMode** - DuckDB create mode (fails if table exists)
+19. **Test19_SqlServerOverwriteMode** - SQL Server overwrite mode (replaces existing data)
+20. **Test20_SqlServerAppendMode** - SQL Server append mode (adds to existing data)
+21. **Test21_SqlServerCreateMode** - SQL Server create mode (fails if table exists)
 
 ## Running the Tests
 

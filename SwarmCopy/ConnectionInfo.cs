@@ -15,6 +15,7 @@ namespace SwarmCopy
         public string DbSchema { get; set; } = "dbo";
         public string DbAction { get; set; } = "overwrite";
         public string DbSql { get; set; }
+        public int DbPoolSize { get; set; } = 100;
         public bool IsDuckDb { get; set; }
 
         public bool UseWindowsAuth => string.IsNullOrEmpty(DbUsername) && string.IsNullOrEmpty(DbPassword);
@@ -47,11 +48,11 @@ namespace SwarmCopy
 
             if (UseWindowsAuth)
             {
-                return $"Server={DbHost},{DbPort};Database={DbName};Integrated Security=true;";
+                return $"Server={DbHost},{DbPort};Database={DbName};Integrated Security=true;Max Pool Size={DbPoolSize};";
             }
             else
             {
-                return $"Server={DbHost},{DbPort};Database={DbName};User Id={DbUsername};Password={DbPassword};";
+                return $"Server={DbHost},{DbPort};Database={DbName};User Id={DbUsername};Password={DbPassword};Max Pool Size={DbPoolSize};";
             }
         }
 
@@ -118,6 +119,9 @@ namespace SwarmCopy
 
             if (parameters.TryGetValue("dbsql", out var dbSql))
                 connInfo.DbSql = dbSql;
+
+            if (parameters.TryGetValue("dbpoolsize", out var dbPoolSize) && int.TryParse(dbPoolSize, out var poolSize))
+                connInfo.DbPoolSize = poolSize;
 
             // Set default schema based on database type
             if (string.IsNullOrEmpty(connInfo.DbSchema))

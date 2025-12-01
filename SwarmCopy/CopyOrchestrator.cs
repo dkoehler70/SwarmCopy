@@ -68,12 +68,32 @@ namespace SwarmCopy
                     var partitionsPerTable = Math.Max(1, totalThreads / tables.Length);
                     Console.WriteLine($"Using {partitionsPerTable} partitions per table ({coreCount} cores × {THREAD_MULTIPLIER} = {totalThreads} threads / {tables.Length} tables)");
 
+                    var failedTables = new System.Collections.Concurrent.ConcurrentBag<(string table, Exception error)>();
+
                     Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = coreCount }, table =>
                     {
-                        Console.WriteLine($"Copying table: {table}");
-                        CopySingleTableToTable(inputConn, outputConn, table, table, partitionsPerTable);
-                        Console.WriteLine($"Completed table: {table}");
+                        try
+                        {
+                            Console.WriteLine($"Copying table: {table}");
+                            CopySingleTableToTable(inputConn, outputConn, table, table, partitionsPerTable);
+                            Console.WriteLine($"Completed table: {table}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"ERROR copying table {table}: {ex.Message}");
+                            failedTables.Add((table, ex));
+                        }
                     });
+
+                    if (failedTables.Count > 0)
+                    {
+                        Console.WriteLine($"\n{failedTables.Count} table(s) failed to copy:");
+                        foreach (var (table, error) in failedTables)
+                        {
+                            Console.WriteLine($"  - {table}: {error.Message}");
+                        }
+                        throw new AggregateException($"{failedTables.Count} table(s) failed to copy", failedTables.Select(t => t.error));
+                    }
                 }
             }
             else

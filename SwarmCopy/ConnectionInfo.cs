@@ -15,7 +15,7 @@ namespace SwarmCopy
         public string DbSchema { get; set; } = "dbo";
         public string DbAction { get; set; } = "overwrite";
         public string DbSql { get; set; }
-        public int DbPoolSize { get; set; } = 100;
+        public int DbPoolSize { get; set; } = 500;
         public bool IsDuckDb { get; set; }
 
         public bool UseWindowsAuth => string.IsNullOrEmpty(DbUsername) && string.IsNullOrEmpty(DbPassword);

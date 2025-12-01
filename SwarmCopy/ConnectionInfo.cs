@@ -16,6 +16,7 @@ namespace SwarmCopy
         public string DbAction { get; set; } = "overwrite";
         public string DbSql { get; set; }
         public int DbPoolSize { get; set; } = 500;
+        public int DbParallel { get; set; } = 4;
         public bool IsDuckDb { get; set; }
 
         public bool UseWindowsAuth => string.IsNullOrEmpty(DbUsername) && string.IsNullOrEmpty(DbPassword);
@@ -122,6 +123,9 @@ namespace SwarmCopy
 
             if (parameters.TryGetValue("dbpoolsize", out var dbPoolSize) && int.TryParse(dbPoolSize, out var poolSize))
                 connInfo.DbPoolSize = poolSize;
+
+            if (parameters.TryGetValue("dbparallel", out var dbParallel) && int.TryParse(dbParallel, out var parallel))
+                connInfo.DbParallel = parallel;
 
             // Set default schema based on database type
             if (string.IsNullOrEmpty(connInfo.DbSchema))

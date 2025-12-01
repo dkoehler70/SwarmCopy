@@ -64,13 +64,14 @@ namespace SwarmCopy
                 {
                     // Direct copy for SQL Server
                     var coreCount = Environment.ProcessorCount;
+                    var maxParallelTables = outputConn.DbParallel;
                     var totalThreads = coreCount * THREAD_MULTIPLIER;
                     var partitionsPerTable = Math.Max(1, totalThreads / tables.Length);
-                    Console.WriteLine($"Using {partitionsPerTable} partitions per table ({coreCount} cores × {THREAD_MULTIPLIER} = {totalThreads} threads / {tables.Length} tables)");
+                    Console.WriteLine($"Using {maxParallelTables} parallel tables, {partitionsPerTable} partitions per table ({coreCount} cores × {THREAD_MULTIPLIER} = {totalThreads} threads / {tables.Length} tables)");
 
                     var failedTables = new System.Collections.Concurrent.ConcurrentBag<(string table, Exception error)>();
 
-                    Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = coreCount }, table =>
+                    Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = maxParallelTables }, table =>
                     {
                         try
                         {
